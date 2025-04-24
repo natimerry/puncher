@@ -1,16 +1,12 @@
-use env_logger::Builder;
 use tokio::net::{TcpStream, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
-use tokio::spawn;
+use tokio::sync::{Mutex, mpsc::{unbounded_channel, UnboundedSender}};
+use tokio::{spawn, select};
 use clap::Parser;
 use std::collections::VecDeque;
-use std::env;
+use std::net::SocketAddr;
 use std::error::Error;
 use std::sync::Arc;
-
-use log::{debug, error, info, trace, warn};
-
 
 type SharedPool = Arc<Mutex<VecDeque<TcpStream>>>;
 
@@ -53,23 +49,23 @@ async fn bidirectional(mut a: TcpStream, mut b: TcpStream) {
 // CLIENT
 async fn run_forwarder(server_addr: String, local_addr: String, pool_size: usize) -> Result<(), Box<dyn Error>> {
     let mut control = TcpStream::connect(&server_addr).await?;
-    info!("[Client] Connected to control channel at {}", server_addr);
+    println!("[Client] Connected to control channel at {}", server_addr);
 
     // Pre-establish reverse data connections
     let pool = Arc::new(Mutex::new(VecDeque::new()));
-    for idx in 0..pool_size {
+    for _ in 0..pool_size {
         let conn = TcpStream::connect(&server_addr).await?;
-        info!("[Client {idx}] Added reverse connection to pool");
+        println!("[Client] Added reverse connection to pool");
         pool.lock().await.push_back(conn);
     }
 
     loop {
         let mut buf = [0u8; 1];
         control.read_exact(&mut buf).await?;
-        debug!("[Client] Received connection request");
+        println!("[Client] Received connection request");
 
         let local = TcpStream::connect(&local_addr).await?;
-        debug!("[Client] Connected to local service");
+        println!("[Client] Connected to local service");
 
         let mut stream = None;
         {
@@ -80,7 +76,7 @@ async fn run_forwarder(server_addr: String, local_addr: String, pool_size: usize
         let reverse_conn = match stream {
             Some(conn) => conn,
             None => {
-                warn!("[Client] Pool empty! Creating new reverse connection");
+                println!("[Client] Pool empty! Creating new reverse connection");
                 TcpStream::connect(&server_addr).await?
             }
         };
@@ -94,9 +90,9 @@ async fn run_listener(public: String, control: String) -> Result<(), Box<dyn Err
     let control_listener = TcpListener::bind(&control).await?;
     let public_listener = TcpListener::bind(&public).await?;
 
-    info!("[VPS] Listening for control on {}", control);
+    println!("[VPS] Listening for control on {}", control);
     let (mut control_conn, _) = control_listener.accept().await?;
-    info!("[VPS] Client connected on control channel");
+    println!("[VPS] Client connected on control channel");
 
     let pool: SharedPool = Arc::new(Mutex::new(VecDeque::new()));
     let pool_clone = pool.clone();
@@ -105,7 +101,7 @@ async fn run_listener(public: String, control: String) -> Result<(), Box<dyn Err
     spawn(async move {
         loop {
             let (stream, _) = control_listener.accept().await.unwrap();
-            debug!("[VPS] Reverse data connection accepted");
+            println!("[VPS] Reverse data connection accepted");
             pool_clone.lock().await.push_back(stream);
         }
     });
@@ -113,7 +109,7 @@ async fn run_listener(public: String, control: String) -> Result<(), Box<dyn Err
     // Handle public connections
     loop {
         let (incoming_conn, addr) = public_listener.accept().await?;
-        info!("[VPS] Incoming connection from {}", addr);
+        println!("[VPS] Incoming connection from {}", addr);
 
         // Notify client to prepare to forward
         control_conn.write_all(&[1u8]).await?;
@@ -130,36 +126,14 @@ async fn run_listener(public: String, control: String) -> Result<(), Box<dyn Err
     }
 }
 
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
 
-fn get_worker_threads() -> usize {
-    env::var("PUNCHER_THREADS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(num_cpus::get) // fallback to number of logical CPUs
-}
+    match cli.mode {
+        Mode::Listen { public, control } => run_listener(public, control).await?,
+        Mode::Forward { server, local, pool_size } => run_forwarder(server, local, pool_size).await?,
+    }
 
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let threads = get_worker_threads();
-    Builder::new()
-        .filter_level(log::LevelFilter::Info) 
-        .parse_env("LOG_LEVEL") 
-        .format_timestamp_secs() 
-        .format_module_path(false)  
-        .format_level(true) 
-        .write_style(env_logger::WriteStyle::Auto) 
-        .init();
-
-    
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(threads)
-        .enable_all()
-        .build()?
-        .block_on(async {
-            let cli = Cli::parse();
-            match cli.mode {
-                Mode::Listen { public, control } => run_listener(public, control).await?,
-                Mode::Forward { server, local, pool_size } => run_forwarder(server, local, pool_size).await?,            }
-            Ok(())
-        })
+    Ok(())
 }
