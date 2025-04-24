@@ -13,3 +13,12 @@ rustflags = [
     "-C", "link-arg=-Wl,--no-allow-shlib-undefined",
     "-C", "link-arg=-no-pie",  # If not using PIE
 ]
+
+
+[target.aarch64-linux-android]
+ar = "/home/natimerry/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar"
+linker = "/home/natimerry/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+
+[target.armv7-linux-androideabi]
+ar = "/home/natimerry/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/arm-linux-androideabi-ar"
+linker = "/home/natimerry/Android/Sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
