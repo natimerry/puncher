@@ -1,0 +1,15 @@
+
+[target.mips-unknown-linux-musl]
+linker = "mips-linux-muslsf-gcc"
+
+rustflags = [
+    # Force linker usage (redundant but ensures no fallback to /usr/bin/ld)
+    "-C", "linker=mips-linux-muslsf-gcc",
+
+    # Ensure dynamic linker is correct (soft-float musl)
+    "-C", "link-arg=-Wl,--dynamic-linker=/lib/ld-musl-mips-sf.so.1",
+
+    # Disable host defaults
+    "-C", "link-arg=-Wl,--no-allow-shlib-undefined",
+    "-C", "link-arg=-no-pie",  # If not using PIE
+]
