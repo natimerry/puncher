@@ -9,7 +9,7 @@ use tokio::spawn;
 
 use log::{debug, error, info, trace};
 const CONTROL_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1); // Timeout for write operation
-
+const BUFFER_SIZE: usize = 8192; 
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -44,8 +44,11 @@ async fn bidirectional(mut a: TcpStream, mut b: TcpStream) {
     let (mut ar, mut aw) = a.split();
     let (mut br, mut bw) = b.split();
 
-    let forward1 = tokio::io::copy(&mut ar, &mut bw);
-    let forward2 = tokio::io::copy(&mut br, &mut aw);
+    let mut buf_ar = tokio::io::BufReader::with_capacity(8 * 1024, &mut ar);
+    let mut buf_br = tokio::io::BufReader::with_capacity(8 * 1024, &mut br);
+
+    let forward1 = tokio::io::copy_buf(&mut buf_ar, &mut bw);
+    let forward2 = tokio::io::copy_buf(&mut buf_br, &mut aw);
 
     let _ = tokio::try_join!(forward1, forward2);
 }
@@ -83,9 +86,8 @@ async fn run_listener(public: String, control: String) -> Result<(), Box<dyn Err
         loop {
             let (incoming_conn, addr) = public_listener.accept().await?;
             trace!("[VPS {public_str} ] Incoming connection from {}", addr);
-    
-            print!("HERE\n");
-            if dbg!(timeout(CONTROL_WRITE_TIMEOUT, control_conn.write_all(&[1u8])).await).is_err() {
+
+            if timeout(CONTROL_WRITE_TIMEOUT, control_conn.write_all(&[1u8])).await.is_err() {
                 error!("[VPS {public_str}] Failed to notify client to connect (write timeout)");
                 return Ok(());
             }
