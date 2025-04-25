@@ -1,12 +1,12 @@
-use env_logger::Builder;
-use tokio::net::{TcpStream, TcpListener};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::spawn;
 use clap::Parser;
+use env_logger::Builder;
 use std::env;
 use std::error::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::spawn;
 
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, trace};
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -18,10 +18,15 @@ struct Cli {
 #[derive(clap::Subcommand, Debug)]
 enum Mode {
     Listen {
+        #[arg(long, default_value = "0.0.0.0")]
+        public_host: String,
+        #[arg(long, default_value = "0.0.0.0")]
+        control_host: String,
+
         #[arg(long)]
-        public: String,
+        public_ports: String,
         #[arg(long)]
-        control: String,
+        control_ports: String,
     },
     Forward {
         #[arg(long)]
@@ -42,7 +47,6 @@ async fn bidirectional(mut a: TcpStream, mut b: TcpStream) {
     let _ = tokio::try_join!(forward1, forward2);
 }
 
-// CLIENT
 async fn run_forwarder(server_addr: String, local_addr: String) -> Result<(), Box<dyn Error>> {
     let mut control = TcpStream::connect(&server_addr).await?;
     info!("[Client] Connected to control channel at {}", server_addr);
@@ -67,20 +71,21 @@ async fn run_listener(public: String, control: String) -> Result<(), Box<dyn Err
     let control_listener = TcpListener::bind(&control).await?;
     let public_listener = TcpListener::bind(&public).await?;
 
-    info!("[VPS] Listening for control on {}", control);
+    let public_str = public.as_str();
+    info!("[VPS {public_str}] Listening for control on {}", control);
     let (mut control_conn, _) = control_listener.accept().await?;
-    info!("[VPS] Client connected on control channel");
+    info!("[VPS {public_str}] Client connected on control channel");
 
     loop {
         let (incoming_conn, addr) = public_listener.accept().await?;
-        trace!("[VPS] Incoming connection from {}", addr);
+        trace!("[VPS {public_str} ] Incoming connection from {}", addr);
 
         // Notify client to connect
         control_conn.write_all(&[1u8]).await?;
 
         // Accept reverse connection
         let (reverse_conn, _) = control_listener.accept().await?;
-        trace!("[VPS] Accepted reverse connection for client {}", addr);
+        trace!("[VPS {public_str}] Accepted reverse connection for client {}", addr);
 
         spawn(bidirectional(incoming_conn, reverse_conn));
     }
@@ -91,6 +96,23 @@ fn get_worker_threads() -> usize {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(num_cpus::get)
+}
+
+// Returns a range of ports
+fn split_to_port_range(port: &str) -> Vec<i32> {
+    if port.contains("-") {
+        let (start_port, end_port) = port.split_once("-").expect("Invalid port arguments");
+
+        let (start_port, end_port) = (
+            start_port
+                .parse::<i32>()
+                .expect("Start port is non numerical"),
+            end_port.parse::<i32>().expect("End Port is non numerical"),
+        );
+        (start_port..=end_port).collect()
+    } else {
+        vec![port.parse().expect("Non numerical port provided")]
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -110,8 +132,65 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build()?
         .block_on(async {
             let cli = Cli::parse();
+
             match cli.mode {
-                Mode::Listen { public, control } => run_listener(public, control).await?,
+                Mode::Listen {
+                    public_host,
+                    control_host,
+                    public_ports,
+                    control_ports,
+                } => {
+                    let public_ports = split_to_port_range(&public_ports);
+                    let control_ports = split_to_port_range(&control_ports);
+
+                    assert_eq!(
+                        public_ports.len(),
+                        control_ports.len(),
+                        "Port ranges must be of equal length"
+                    );
+
+                    // Check for overlap
+                    let public_set: std::collections::HashSet<_> =
+                        public_ports.iter().cloned().collect();
+                    let control_set: std::collections::HashSet<_> =
+                        control_ports.iter().cloned().collect();
+
+                    assert!(
+                        public_set.is_disjoint(&control_set),
+                        "Public and control port ranges must not overlap"
+                    );
+
+                    let mut handles = Vec::new();
+
+                    for (pub_port, ctrl_port) in public_ports.iter().copied().zip(control_ports.iter().copied()) {
+                        let public_host = public_host.clone();
+                        let control_host = control_host.clone();
+                    
+                        let handle = tokio::spawn(async move {
+                            info!(
+                                "Running listener for {} with control node at {}",
+                                pub_port, ctrl_port
+                            );
+                            if let Err(e) = run_listener(
+                                format!("{}:{}", public_host, pub_port),
+                                format!("{}:{}", control_host, ctrl_port),
+                            )
+                            .await
+                            {
+                                error!(
+                                    "Listener error on ports {} and {}: {}",
+                                    pub_port, ctrl_port, e
+                                );
+                            }
+                        });
+                    
+                        handles.push(handle);
+                    }
+                    
+                    for handle in handles {
+                        let _ = handle.await;
+                    }
+                }
                 Mode::Forward { server, local } => run_forwarder(server, local).await?,
             }
             Ok(())
