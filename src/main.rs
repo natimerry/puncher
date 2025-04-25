@@ -1,5 +1,6 @@
 use clap::Parser;
 use env_logger::Builder;
+use tokio::time::timeout;
 use std::env;
 use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -7,6 +8,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::spawn;
 
 use log::{debug, error, info, trace};
+const CONTROL_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1); // Timeout for write operation
+
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -68,27 +71,44 @@ async fn run_forwarder(server_addr: String, local_addr: String) -> Result<(), Bo
 
 // SERVER
 async fn run_listener(public: String, control: String) -> Result<(), Box<dyn Error>> {
-    let control_listener = TcpListener::bind(&control).await?;
-    let public_listener = TcpListener::bind(&public).await?;
-
-    let public_str = public.as_str();
-    info!("[VPS {public_str}] Listening for control on {}", control);
-    let (mut control_conn, _) = control_listener.accept().await?;
-    info!("[VPS {public_str}] Client connected on control channel");
-
     loop {
-        let (incoming_conn, addr) = public_listener.accept().await?;
-        trace!("[VPS {public_str} ] Incoming connection from {}", addr);
+        let control_listener = TcpListener::bind(&control).await?;
+        let public_listener = TcpListener::bind(&public).await?;
+    
+        let public_str = public.as_str();
+        info!("[VPS {public_str}] Listening for control on {}", control);
+        let (mut control_conn, _) = control_listener.accept().await?;
+        info!("[VPS {public_str}] Client connected on control channel");
 
-        // Notify client to connect
-        control_conn.write_all(&[1u8]).await?;
-
-        // Accept reverse connection
-        let (reverse_conn, _) = control_listener.accept().await?;
-        trace!("[VPS {public_str}] Accepted reverse connection for client {}", addr);
-
-        spawn(bidirectional(incoming_conn, reverse_conn));
+        loop {
+            let (incoming_conn, addr) = public_listener.accept().await?;
+            trace!("[VPS {public_str} ] Incoming connection from {}", addr);
+    
+            print!("HERE\n");
+            if dbg!(timeout(CONTROL_WRITE_TIMEOUT, control_conn.write_all(&[1u8])).await).is_err() {
+                error!("[VPS {public_str}] Failed to notify client to connect (write timeout)");
+                return Ok(());
+            }
+    
+            // Accept reverse connection
+            let reverse_conn = match timeout(CONTROL_WRITE_TIMEOUT, control_listener.accept()).await {
+                Ok(Ok((reverse_conn, _))) => reverse_conn,
+                Ok(Err(e)) => {
+                    error!("[VPS {public_str}] Failed to accept reverse connection: {}", e);
+                    break; // Exit the loop or handle the error
+                }
+                Err(_) => {
+                    error!("[VPS {public_str}] Reverse connection accept timed out");
+                    break; // Exit the loop or handle the timeout
+                }
+            };
+            trace!("[VPS {public_str}] Accepted reverse connection for client {}", addr);
+    
+            spawn(bidirectional(incoming_conn, reverse_conn));
+        }
     }
+    Ok(())
+
 }
 
 fn get_worker_threads() -> usize {
